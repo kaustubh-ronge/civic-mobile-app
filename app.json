@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "civic-reporting-app",
+    "name": "CivicConnect",
     "slug": "civic-reporting-app",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -9,9 +9,11 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.kaustubh.civicconnect"
     },
     "android": {
+      "package": "com.kaustubh.civicconnect",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
