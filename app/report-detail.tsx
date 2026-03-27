@@ -1,9 +1,10 @@
 
 
 import { useAuth } from '@clerk/clerk-expo';
+import { ResizeMode, Video } from 'expo-av';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { ArrowLeft, Building2, Clock, MapPin, Tag, VideoIcon } from 'lucide-react-native';
-import React, { useEffect, useState } from 'react';
+import { ArrowLeft, Building2, Clock, MapPin, Maximize, Tag, VideoIcon } from 'lucide-react-native';
+import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Image, Linking, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -11,22 +12,13 @@ const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
 
 const parseJsonResponse = async (res: Response) => {
   const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} ${res.statusText}: ${text}`);
-  }
-  try {
-    return JSON.parse(text);
-  } catch (err) {
-    throw new Error(`Invalid JSON from ${res.url}: ${text}`);
-  }
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${text}`);
+  try { return JSON.parse(text); } catch (err) { throw new Error("Invalid JSON"); }
 };
 
 const timeAgo = (date: string | Date) => {
   if (!date) return "N/A";
-  const now = new Date();
-  const then = new Date(date);
-  const seconds = Math.floor((now.getTime() - then.getTime()) / 1000);
-
+  const seconds = Math.floor((new Date().getTime() - new Date(date).getTime()) / 1000);
   let interval = Math.floor(seconds / 31536000);
   if (interval >= 1) return interval + "y ago";
   interval = Math.floor(seconds / 2592000);
@@ -38,6 +30,34 @@ const timeAgo = (date: string | Date) => {
   interval = Math.floor(seconds / 60);
   if (interval >= 1) return interval + "m ago";
   return "just now";
+};
+
+// --- Inline Video Player Component ---
+const InlineVideoPlayer = ({ videoUrl }: { videoUrl: string }) => {
+  const videoRef = useRef<Video>(null);
+
+  const goFullScreen = async () => {
+    if (videoRef.current) {
+      await videoRef.current.presentFullscreenPlayer();
+    }
+  };
+
+  return (
+    <View style={styles.videoContainer}>
+      <Video
+        ref={videoRef}
+        source={{ uri: videoUrl }}
+        style={styles.inlineVideo}
+        useNativeControls={true} 
+        resizeMode={ResizeMode.CONTAIN}
+        isLooping={false}
+      />
+      <TouchableOpacity style={styles.fullscreenOverlayBtn} onPress={goFullScreen}>
+        <Maximize size={16} color="white" />
+        <Text style={styles.fullscreenText}>Full Screen</Text>
+      </TouchableOpacity>
+    </View>
+  );
 };
 
 export default function ReportDetailScreen() {
@@ -102,37 +122,40 @@ export default function ReportDetailScreen() {
           <Text style={styles.metaText}>{report.department?.name}</Text>
         </View>
 
-        {/* GALLERY */}
+        <Text style={styles.sectionTitle}>Description</Text>
+        <View style={styles.card}>
+          <Text style={styles.description}>{report.description}</Text>
+        </View>
+
+        {/* EVIDENCE GALLERY (Stacked Vertically) */}
         <Text style={styles.sectionTitle}>Evidence Gallery</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.gallery}>
+        <View style={styles.verticalGallery}>
+          
+          {/* Images */}
           {report.images?.map((img: any, i: number) => (
             <TouchableOpacity key={`img-${i}`} onPress={() => Linking.openURL(img.url)}>
               <Image source={{ uri: img.url }} style={styles.galleryImg} />
             </TouchableOpacity>
           ))}
 
-          {((report.videos && report.videos.length > 0) ? report.videos : (report.muxVideoIds || [])).map((vid: any, i: number) => {
-            const playbackId = vid.playbackId || vid;
-            const videoUrl = vid.url || `https://stream.mux.com/${playbackId}.m3u8`;
-            return (
-              <TouchableOpacity
-                key={`vid-${i}`}
-                style={[styles.galleryImg, styles.videoPlaceholder]}
-                onPress={() => Linking.openURL(videoUrl)}
-              >
-                <VideoIcon size={32} color="#ea580c" />
-                <Text style={styles.videoLabel}>PLAY VIDEO</Text>
-              </TouchableOpacity>
-            );
+          {/* Videos */}
+          {((report.videos && report.videos.length > 0) ? report.videos : []).map((vid: any, i: number) => {
+            const playbackId = vid.playbackId;
+            const videoUrl = playbackId ? `https://stream.mux.com/${playbackId}.m3u8` : vid.url;
+
+            if (!videoUrl) return null;
+
+            return <InlineVideoPlayer key={`vid-${i}`} videoUrl={videoUrl} />;
           })}
 
-          {(!report.images?.length && !(report.videos?.length || report.muxVideoIds?.length)) && (
+          {/* Placeholder if empty */}
+          {(!report.images?.length && !report.videos?.length) && (
             <View style={[styles.galleryImg, styles.videoPlaceholder]}>
               <VideoIcon size={32} color="#94a3b8" />
-              <Text style={styles.videoLabel}>No evidence uploaded yet</Text>
+              <Text style={styles.videoLabel}>No evidence uploaded</Text>
             </View>
           )}
-        </ScrollView>
+        </View>
 
         {/* TAGS */}
         {report.tags?.length > 0 && (
@@ -145,11 +168,6 @@ export default function ReportDetailScreen() {
             ))}
           </View>
         )}
-
-        <Text style={styles.sectionTitle}>Description</Text>
-        <View style={styles.card}>
-          <Text style={styles.description}>{report.description}</Text>
-        </View>
 
         <Text style={styles.sectionTitle}>Location</Text>
         <TouchableOpacity 
@@ -196,14 +214,52 @@ const styles = StyleSheet.create({
   metaRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 25 },
   metaText: { color: '#64748b', fontSize: 14, marginLeft: 5 },
   sectionTitle: { color: '#94a3b8', fontSize: 14, fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12, marginTop: 10 },
-  gallery: { marginBottom: 20 },
-  galleryImg: { width: 150, height: 150, borderRadius: 16, marginRight: 12, backgroundColor: '#1e293b' },
+  
+  // --- UPDATED LAYOUT STYLES ---
+  verticalGallery: { 
+    marginBottom: 20,
+    flexDirection: 'column', 
+  },
+  galleryImg: { 
+    width: '100%',     // Now stretches full width
+    height: 220,       // Taller height for better viewing
+    borderRadius: 16, 
+    backgroundColor: '#1e293b',
+    marginBottom: 16,  // Spacing between stacked items
+  },
+  videoContainer: { 
+    width: '100%',     // Now stretches full width
+    height: 220,       // Matches image height
+    borderRadius: 16, 
+    overflow: 'hidden', 
+    backgroundColor: '#0f172a', 
+    borderWidth: 1, 
+    borderColor: '#1e293b',
+    marginBottom: 16,  // Spacing between stacked items
+  },
+  inlineVideo: { 
+    width: '100%', 
+    height: '100%' 
+  },
+  fullscreenOverlayBtn: { 
+    position: 'absolute', 
+    top: 10, 
+    right: 10, 
+    backgroundColor: 'rgba(0,0,0,0.6)', 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    paddingHorizontal: 10, 
+    paddingVertical: 6, 
+    borderRadius: 8 
+  },
+  fullscreenText: { color: 'white', fontSize: 12, fontWeight: 'bold', marginLeft: 6 },
   videoPlaceholder: { alignItems: 'center', justifyContent: 'center', borderStyle: 'dashed', borderWidth: 1, borderColor: '#ea580c' },
-  videoLabel: { color: '#ea580c', fontSize: 10, marginTop: 5, fontWeight: 'bold' },
+  videoLabel: { color: '#ea580c', fontSize: 12, marginTop: 8, fontWeight: 'bold' },
+  
   tagRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 20 },
   tagBadge: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.05)', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8, gap: 5 },
   tagText: { color: '#94a3b8', fontSize: 12 },
-  card: { backgroundColor: 'rgba(255,255,255,0.03)', padding: 16, borderRadius: 16, borderLeftWidth: 3, borderLeftColor: '#ea580c' },
+  card: { backgroundColor: 'rgba(255,255,255,0.03)', padding: 16, borderRadius: 16, borderLeftWidth: 3, borderLeftColor: '#ea580c', marginBottom: 20 },
   description: { color: '#cbd5e1', fontSize: 16, lineHeight: 24 },
   locationCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.03)', padding: 16, borderRadius: 16, marginTop: 5 },
   locationText: { color: 'white', flex: 1, marginLeft: 10, fontSize: 14 },

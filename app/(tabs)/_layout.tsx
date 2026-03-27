@@ -4,8 +4,11 @@ import { Platform } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function TabLayout() {
-  // This hook grabs the exact pixel height of the phone's hardware navigation area
+  // Grabs the exact pixel height of the phone's hardware navigation area
   const insets = useSafeAreaInsets();
+
+  // Smart calculation: Use the phone's hardware inset. If it's 0 (some Androids), force a 15px minimum gap.
+  const safeBottom = Math.max(insets.bottom, Platform.OS === 'android' ? 15 : 0);
 
   return (
     <Tabs
@@ -14,9 +17,9 @@ export default function TabLayout() {
         tabBarStyle: {
           backgroundColor: '#020617', // slate-950
           borderTopColor: 'rgba(255,255,255,0.1)',
-          // Dynamically calculate height and padding based on the specific phone
-          height: Platform.OS === 'android' ? 70 : 60 + insets.bottom,
-          paddingBottom: Platform.OS === 'android' ? 10 : insets.bottom,
+          // Dynamically set height and padding based on the phone's exact screen dimensions
+          height: 60 + safeBottom,
+          paddingBottom: safeBottom,
           paddingTop: 8,
         },
         tabBarActiveTintColor: '#f97316', // orange-500
