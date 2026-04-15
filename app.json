@@ -52,7 +52,7 @@
       "reactCompiler": true
     },
     "extra": {
-      "router": {},
+      "router": {}
       
     }
   }
