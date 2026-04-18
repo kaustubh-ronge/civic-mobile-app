@@ -16,15 +16,15 @@
         "simulator": true
       },
       "env": {
-        "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY": "PASTE_YOUR_ACTUAL_CLERK_KEY_HERE",
-        "EXPO_PUBLIC_API_URL": "PASTE_YOUR_ACTUAL_LOCAL_IP_URL_HERE"
+        "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY": "pk_test_Y3JlZGlibGUtZ3JvdXBlci00OC5jbGVyay5hY2NvdW50cy5kZXYk",
+        "EXPO_PUBLIC_API_URL": "https://civic-issue-reporting-system-mu.vercel.app/api/"
       }
     },
     "production": {
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY": "",
-        "EXPO_PUBLIC_API_URL": ""
+        "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY": "pk_test_Y3JlZGlibGUtZ3JvdXBlci00OC5jbGVyay5hY2NvdW50cy5kZXYk",
+        "EXPO_PUBLIC_API_URL": "https://civic-issue-reporting-system-mu.vercel.app/api/"
       }
     }
   },

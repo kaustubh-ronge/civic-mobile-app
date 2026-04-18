@@ -1,9 +1,10 @@
 
-
 import { useAuth } from '@clerk/clerk-expo';
 import { ResizeMode, Video } from 'expo-av';
+import * as FileSystem from 'expo-file-system/legacy';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { ArrowLeft, Building2, Clock, MapPin, Maximize, Tag, VideoIcon } from 'lucide-react-native';
+import * as Sharing from 'expo-sharing';
+import { ArrowLeft, Building2, Clock, FileDown, MapPin, Maximize, Tag, VideoIcon } from 'lucide-react-native';
 import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Image, Linking, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -67,6 +68,7 @@ export default function ReportDetailScreen() {
   
   const [report, setReport] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
 
   useEffect(() => {
     const fetchDetail = async () => {
@@ -86,6 +88,44 @@ export default function ReportDetailScreen() {
     };
     if (id) fetchDetail();
   }, [id]);
+
+  // --- SECURE PDF DOWNLOAD LOGIC ---
+  const handleDownloadPdf = async () => {
+    setIsDownloadingPdf(true);
+    try {
+      const token = await getToken();
+      
+      const pdfUrl = `${API_BASE_URL}/reports/${report.reportId}/pdf`; 
+      const fileUri = `${FileSystem.documentDirectory}CivicAudit_${report.reportId}.pdf`;
+
+      const downloadResult = await FileSystem.downloadAsync(pdfUrl, fileUri, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+
+      if (downloadResult.status === 200) {
+        // Trigger native share/view sheet
+        if (await Sharing.isAvailableAsync()) {
+          await Sharing.shareAsync(downloadResult.uri, {
+            mimeType: 'application/pdf',
+            dialogTitle: 'View Environmental Risk Report',
+          });
+        } else {
+          Alert.alert("Success", "PDF downloaded successfully.");
+        }
+      } else if (downloadResult.status === 404) {
+        Alert.alert("Not Ready", "The AI is still generating the risk report. Please try again later.");
+      } else {
+        throw new Error(`Server returned status ${downloadResult.status}`);
+      }
+    } catch (error) {
+      console.error("PDF Download Error:", error);
+      Alert.alert("Download Error", "Could not connect to the server to download the PDF.");
+    } finally {
+      setIsDownloadingPdf(false);
+    }
+  };
 
   if (loading) return <View style={[styles.container, styles.center]}><ActivityIndicator color="#ea580c" size="large" /></View>;
   if (!report) return <View style={[styles.container, styles.center]}><Text style={{color: 'white'}}>Report not found.</Text></View>;
@@ -121,6 +161,22 @@ export default function ReportDetailScreen() {
           <Building2 size={14} color="#64748b" style={{marginLeft: 15}} />
           <Text style={styles.metaText}>{report.department?.name}</Text>
         </View>
+
+        {/* PDF DOWNLOAD BUTTON */}
+        <TouchableOpacity 
+          style={styles.pdfBtn} 
+          onPress={handleDownloadPdf} 
+          disabled={isDownloadingPdf}
+        >
+          {isDownloadingPdf ? (
+            <ActivityIndicator color="#3b82f6" size="small" />
+          ) : (
+            <FileDown size={20} color="#3b82f6" />
+          )}
+          <Text style={styles.pdfBtnText}>
+            {isDownloadingPdf ? "Downloading PDF..." : "Download Official Risk Report"}
+          </Text>
+        </TouchableOpacity>
 
         <Text style={styles.sectionTitle}>Description</Text>
         <View style={styles.card}>
@@ -211,9 +267,28 @@ const styles = StyleSheet.create({
   badgeRow: { flexDirection: 'row', gap: 8, marginBottom: 15 },
   miniBadge: { backgroundColor: 'rgba(234,88,12,0.1)', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6 },
   miniBadgeText: { color: '#cbd5e1', fontSize: 10, fontWeight: 'bold' },
-  metaRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 25 },
+  metaRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 15 },
   metaText: { color: '#64748b', fontSize: 14, marginLeft: 5 },
   sectionTitle: { color: '#94a3b8', fontSize: 14, fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12, marginTop: 10 },
+  
+  // --- NEW PDF BUTTON STYLES ---
+  pdfBtn: { 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    justifyContent: 'center',
+    backgroundColor: 'rgba(59,130,246,0.1)', 
+    paddingVertical: 14, 
+    borderRadius: 12,
+    borderWidth: 1, 
+    borderColor: 'rgba(59,130,246,0.3)', 
+    marginBottom: 25 
+  },
+  pdfBtnText: { 
+    color: '#3b82f6', 
+    fontWeight: 'bold', 
+    marginLeft: 10, 
+    fontSize: 15 
+  },
   
   // --- UPDATED LAYOUT STYLES ---
   verticalGallery: { 
@@ -221,21 +296,21 @@ const styles = StyleSheet.create({
     flexDirection: 'column', 
   },
   galleryImg: { 
-    width: '100%',     // Now stretches full width
-    height: 220,       // Taller height for better viewing
+    width: '100%',     
+    height: 220,       
     borderRadius: 16, 
     backgroundColor: '#1e293b',
-    marginBottom: 16,  // Spacing between stacked items
+    marginBottom: 16,  
   },
   videoContainer: { 
-    width: '100%',     // Now stretches full width
-    height: 220,       // Matches image height
+    width: '100%',     
+    height: 220,       
     borderRadius: 16, 
     overflow: 'hidden', 
     backgroundColor: '#0f172a', 
     borderWidth: 1, 
     borderColor: '#1e293b',
-    marginBottom: 16,  // Spacing between stacked items
+    marginBottom: 16,  
   },
   inlineVideo: { 
     width: '100%', 

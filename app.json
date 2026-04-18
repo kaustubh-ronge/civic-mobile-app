@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "CivicConnect",
-    "slug": "civic-reporting-app",
+    "slug": "civic-issue-2",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
@@ -50,7 +50,11 @@
       "newArchEnabled": true
     },
     "extra": {
-      "router": {}
-    }
+      "router": {},
+      "eas": {
+        "projectId": "1326f782-ae7c-4c70-8dc2-27f8dbc1771b"
+      }
+    },
+    "owner": "kaustubh-ronge"
   }
 }

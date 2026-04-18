@@ -1,10 +1,10 @@
 
-
 import { useAuth, useUser } from '@clerk/clerk-expo';
-import * as FileSystem from 'expo-file-system/legacy'; // <-- FIXED DEPRECATION WARNING
+import { Audio } from 'expo-av';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
-import { Camera, ChevronDown, Info, MapPin, Plus, Search, ShieldAlert, Video, X } from 'lucide-react-native';
+import { Camera, ChevronDown, FileEdit, Info, MapPin, Mic, Plus, Search, ShieldAlert, Sparkles, Video, X } from 'lucide-react-native';
 import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator, Alert, Image, KeyboardAvoidingView, Modal, Platform,
@@ -12,15 +12,27 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-const API_BASE_URL = (process.env.EXPO_PUBLIC_API_URL || 'http://10.0.2.2:3000/api').replace(/\/$/, '');
+// Automatically cleans up the URLs from your .env file
+const API_BASE_URL = (process.env.EXPO_PUBLIC_API_URL || 'http://10.0.2.2:3000/api').replace(/['"]/g, '').replace(/\/$/, '');
+const ML_ENGINE_URL = (process.env.EXPO_PUBLIC_ML_ENGINE_URL || 'https://kaustubhronge-civic-ai-engine.hf.space').replace(/['"]/g, '').replace(/\/$/, '');
 
 const PREDEFINED_CATEGORIES = ["Roads & Potholes", "Water Supply", "Electricity / Lights", "Garbage & Sanitation", "Public Transport", "Other"];
 const PRIORITIES = [{ label: "Auto-detect", value: "AUTO" }, { label: "Low", value: "LOW" }, { label: "Medium", value: "MEDIUM" }, { label: "High", value: "HIGH" }, { label: "Critical", value: "CRITICAL" }];
+
+// --- WEB FIX HELPER ---
+// If you ever test on the web browser again, this converts the image to a Blob
+const getBlobFromUri = async (uri: string) => {
+  const response = await fetch(uri);
+  return await response.blob();
+};
+// ----------------------
 
 export default function ReportScreen() {
   const { user } = useUser();
   const { getToken } = useAuth();
   const router = useRouter();
+
+  const [activeMainTab, setActiveMainTab] = useState<'manual' | 'smart'>('manual');
 
   const [cities, setCities] = useState<any[]>([]);
   const [departments, setDepartments] = useState<any[]>([]);
@@ -41,6 +53,14 @@ export default function ReportScreen() {
   const [tagInput, setTagInput] = useState('');
   const [images, setImages] = useState<string[]>([]);
   const [videos, setVideos] = useState<string[]>([]);
+
+  // --- AI STATES ---
+  const [scannedImageUri, setScannedImageUri] = useState<string | null>(null);
+  const [aiImageBase64, setAiImageBase64] = useState<string | null>(null);
+  const [isAnalyzingImage, setIsAnalyzingImage] = useState(false);
+  
+  const [recording, setRecording] = useState<Audio.Recording | null>(null);
+  const [isProcessingVoice, setIsProcessingVoice] = useState(false);
 
   const [loading, setLoading] = useState(false);
   const [activeDropdown, setActiveDropdown] = useState<'city' | 'dept' | 'cat' | 'pri' | null>(null);
@@ -89,13 +109,177 @@ export default function ReportScreen() {
     return () => clearTimeout(delay);
   }, [locationQuery]);
 
+  // --- AI FEATURE 1: SMART VISION SCANNER ---
+  const handleSmartScan = async () => {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsMultipleSelection: false,
+      quality: 0.5,
+    });
+
+    if (result.canceled || !result.assets[0].uri) return;
+
+    const fileUri = result.assets[0].uri;
+    const filename = fileUri.split('/').pop() || 'scan.jpg';
+    
+    setScannedImageUri(fileUri);
+    setAiImageBase64(null); 
+    setIsAnalyzingImage(true);
+
+    try {
+      let data;
+
+      // CROSS-PLATFORM UPLOAD LOGIC
+      if (Platform.OS === 'web') {
+        const formData = new FormData();
+        const blob = await getBlobFromUri(fileUri);
+        formData.append('file', blob, filename);
+
+        const response = await fetch(`${ML_ENGINE_URL}/analyze-issue`, {
+          method: 'POST',
+          body: formData,
+        });
+        if (!response.ok) throw new Error("ML Engine down");
+        data = await response.json();
+
+      } else {
+        // Native Mobile Upload (For your physical phone)
+        const uploadResult = await FileSystem.uploadAsync(`${ML_ENGINE_URL}/analyze-issue`, fileUri, {
+          httpMethod: 'POST',
+          uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+          fieldName: 'file',
+          mimeType: 'image/jpeg',
+        });
+        if (uploadResult.status !== 200) throw new Error(`ML Engine returned ${uploadResult.status}`);
+        data = JSON.parse(uploadResult.body);
+      }
+
+      if (data.status === "success" && data.issues_found > 0) {
+        const issue = data.data[0];
+        const aiClass = issue.class_name.toLowerCase();
+
+        if (aiClass.includes('pothole')) setCategory("Roads & Potholes");
+        else if (aiClass.includes('garbage')) setCategory("Garbage & Sanitation");
+        else if (aiClass.includes('pipe')) setCategory("Water Supply");
+        else {
+          setCategory("Other");
+          setCustomCategory(issue.class_name);
+        }
+
+        if (issue.severity) setPriority(issue.severity.toUpperCase());
+        if (tags.length < 5) setTags(prev => [...prev, `AI-${issue.severity}`]);
+
+        if (data.annotated_image) {
+          setAiImageBase64(`data:image/jpeg;base64,${data.annotated_image}`);
+        }
+
+        Alert.alert("AI Assistant", `Detected: ${issue.class_name} (${issue.severity}). Form auto-filled!`);
+      } else {
+        Alert.alert("AI Scan", "Couldn't detect a specific issue. Please fill details manually.");
+      }
+    } catch (error) {
+      console.error("Smart Scan Error:", error);
+      Alert.alert("Connection Error", "Could not connect to the AI Vision Engine.");
+    } finally {
+      setIsAnalyzingImage(false);
+    }
+  };
+
+  // --- AI FEATURE 2: MULTILINGUAL VOICE ENGINE ---
+  const startRecording = async () => {
+    try {
+      await Audio.requestPermissionsAsync();
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+
+      const { recording } = await Audio.Recording.createAsync(
+        Audio.RecordingOptionsPresets.HIGH_QUALITY
+      );
+      setRecording(recording);
+    } catch (err) {
+      console.error("Failed to start recording", err);
+      Alert.alert("Microphone Error", "Could not access microphone.");
+    }
+  };
+
+  const stopRecording = async () => {
+    if (!recording) return;
+    setRecording(null);
+    try {
+      await recording.stopAndUnloadAsync();
+      const uri = recording.getURI();
+      if (uri) {
+        await handleVoiceSubmit(uri);
+      }
+    } catch (err) {
+      console.error("Failed to stop recording", err);
+    }
+  };
+
+  const handleVoiceSubmit = async (uri: string) => {
+    setIsProcessingVoice(true);
+    try {
+      const formData = new FormData();
+      
+      if (Platform.OS === 'web') {
+         const blob = await getBlobFromUri(uri);
+         formData.append("audio", blob, "voice.m4a");
+      } else {
+         formData.append("audio", {
+           uri,
+           name: "voice.m4a", 
+           type: "audio/m4a"
+         } as any);
+      }
+
+      const res = await fetch(`${API_BASE_URL}/process-voice`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await res.json();
+
+      if (data.success) {
+        setDescription(data.translated_text);
+        
+        const generatedTitle = data.translated_text.split(' ').slice(0, 5).join(' ') + "...";
+        setTitle(generatedTitle);
+
+        if (data.category) {
+            const mappedCat = data.category === "Roads" ? "Roads & Potholes" 
+                            : data.category === "Water" ? "Water Supply"
+                            : data.category === "Electricity" ? "Electricity / Lights"
+                            : data.category === "Garbage" ? "Garbage & Sanitation"
+                            : data.category === "Transport" ? "Public Transport"
+                            : "Other";
+            
+            setCategory(mappedCat);
+            if (mappedCat === "Other") setCustomCategory(data.category);
+        }
+
+        if (data.priority) setPriority(data.priority);
+        Alert.alert("Voice Processed", "Translated to English and extracted successfully.");
+      } else {
+        Alert.alert("Processing Failed", data.error || "Failed to analyze audio.");
+      }
+    } catch (error) {
+      console.error(error);
+      Alert.alert("Connection Error", "Could not connect to Voice Engine.");
+    } finally {
+      setIsProcessingVoice(false);
+    }
+  };
+
+  // --- STANDARD MEDIA UPLOAD ---
   const pickImage = async () => {
     if (images.length >= 5) return Alert.alert("Limit Reached", "Max 5 images allowed.");
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['images'],
       allowsMultipleSelection: true,
       selectionLimit: 5 - images.length,
-      quality: 0.2, // Compressed for Vercel
+      quality: 0.2, 
     });
     if (!result.canceled) {
       setImages([...images, ...result.assets.map(a => a.uri)].slice(0, 5));
@@ -114,110 +298,11 @@ export default function ReportScreen() {
     }
   };
 
-  // const handleSubmit = async () => {
-  //   if (!selectedCity || !selectedDept || !locationData || !title || !description || !category) {
-  //     return Alert.alert("Missing Fields", "Please fill out all required fields marked with *");
-  //   }
-
-  //   // Fixed the deprecation warning usage here
-  //   const checkFileSizes = async () => {
-  //     let totalMB = 0;
-  //     const checkUri = async (uri: string, label: string) => {
-  //       const info = await FileSystem.getInfoAsync(uri);
-  //       if (!info.exists || info.size == null) return;
-  //       const mb = info.size / 1024 / 1024;
-  //       totalMB += mb;
-  //       if (mb > 4.0) throw new Error(`One ${label} is too large (${mb.toFixed(1)}MB). Limit is 4.0MB.`);
-  //     };
-
-  //     for (const uri of images) await checkUri(uri, 'image');
-  //     for (const uri of videos) await checkUri(uri, 'video');
-
-  //     if (totalMB > 4.2) throw new Error(`Total upload size (${totalMB.toFixed(1)}MB) exceeds 4.5MB limit.`);
-  //   };
-
-  //   try { await checkFileSizes(); } catch (sizeErr: any) { return Alert.alert('File Too Large', sizeErr.message); }
-
-  //   setLoading(true);
-  //   try {
-  //     const token = await getToken();
-  //     const formData = new FormData();
-
-  //     // 1. DIRECT UPLOAD TO MUX
-  //     const uploadedVideoIds: string[] = [];
-  //     for (const videoUri of videos) {
-  //       const ticketRes = await fetch(`${API_BASE_URL}/mux-upload`);
-  //       if (!ticketRes.ok) throw new Error("Failed to get upload ticket.");
-  //       const { uploadUrl, uploadId } = await ticketRes.json();
-
-  //       // Using FileSystem to safely upload large blobs
-  //       const uploadResult = await FileSystem.uploadAsync(uploadUrl, videoUri, {
-  //         httpMethod: 'PUT',
-  //         headers: { 'Content-Type': 'video/mp4' }
-  //       });
-
-  //       if (uploadResult.status === 200 || uploadResult.status === 201) {
-  //         uploadedVideoIds.push(uploadId);
-  //       } else {
-  //         throw new Error("Mux upload failed.");
-  //       }
-  //     }
-
-  //     // 2. BUILD FORM DATA
-  //     formData.append("title", title);
-  //     formData.append("description", description);
-  //     formData.append("cityId", selectedCity);
-  //     formData.append("departmentId", selectedDept);
-  //     formData.append("lat", String(locationData.lat));
-  //     formData.append("lng", String(locationData.lon));
-  //     formData.append("address", locationData.address);
-  //     formData.append("category", category);
-  //     if (category === "Other") formData.append("customCategory", customCategory);
-  //     formData.append("priority", priority);
-  //     tags.forEach(tag => formData.append("tags", tag));
-
-  //     images.forEach((uri, i) => {
-  //       const filename = uri.split('/').pop() || `image${i}.jpg`;
-  //       formData.append("images", { uri, name: filename, type: 'image/jpeg' } as any);
-  //     });
-
-  //     // Send the Mux IDs to our new dedicated endpoint
-  //     uploadedVideoIds.forEach(id => {
-  //       formData.append("muxVideoIds", id);
-  //     });
-
-  //     // 3. SUBMIT TO THE NEW DEDICATED MOBILE ENDPOINT
-  //     const res = await fetch(`${API_BASE_URL}/reports/mobile`, {
-  //       method: 'POST',
-  //       body: formData,
-  //       headers: { 'Authorization': `Bearer ${token}` },
-  //     });
-
-  //     const data = await parseJsonResponse(res);
-
-  //     if (data.success) {
-  //       Alert.alert("Success!", "Report submitted successfully.", [
-  //         { text: "Track Status", onPress: () => router.push(`/status?track=${data.reportId}`) }
-  //       ]);
-  //       setTitle(''); setDescription(''); setLocationData(null); setLocationQuery(''); setImages([]); setVideos([]); setTags([]);
-  //     } else {
-  //       Alert.alert("Server Error", data.error || "Failed to submit report.");
-  //     }
-  //   } catch (err: any) {
-  //     Alert.alert("Submission Error", err.message || "Connection failed.");
-  //     console.error(err);
-  //   } finally {
-  //     setLoading(false);
-  //   }
-  // };
-
-
   const handleSubmit = async () => {
     if (!selectedCity || !selectedDept || !locationData || !title || !description || !category) {
       return Alert.alert("Missing Fields", "Please fill out all required fields marked with *");
     }
 
-    // --- VERCEL LIMIT ENFORCEMENT ---
     const checkFileSizes = async () => {
       let totalMB = 0;
       const checkUri = async (uri: string, label: string) => {
@@ -230,11 +315,13 @@ export default function ReportScreen() {
         }
       };
 
-      for (const uri of images) await checkUri(uri, 'image');
-      for (const uri of videos) await checkUri(uri, 'video');
+      if (Platform.OS !== 'web') {
+        for (const uri of images) await checkUri(uri, 'image');
+        for (const uri of videos) await checkUri(uri, 'video');
 
-      if (totalMB > 4.2) {
-        throw new Error(`Total upload size (${totalMB.toFixed(1)}MB) exceeds the 4.5MB server limit. Please remove a file.`);
+        if (totalMB > 4.2) {
+          throw new Error(`Total upload size (${totalMB.toFixed(1)}MB) exceeds the 4.5MB server limit. Please remove a file.`);
+        }
       }
     };
 
@@ -246,15 +333,11 @@ export default function ReportScreen() {
 
     setLoading(true);
     try {
-      // 1. Get the token FIRST so we can use it for Mux AND the final submission
       const token = await getToken();
       const formData = new FormData();
 
-      // 2. DIRECT UPLOAD TO MUX
       const uploadedVideoIds: string[] = [];
       for (const videoUri of videos) {
-
-        // --- FIXED: Added the Authorization Header here! ---
         const ticketRes = await fetch(`${API_BASE_URL}/mux-upload`, {
           headers: { 'Authorization': `Bearer ${token}` }
         });
@@ -265,21 +348,28 @@ export default function ReportScreen() {
         }
 
         const { uploadUrl, uploadId } = await ticketRes.json();
-
-        // Using FileSystem to safely upload large blobs to the URL Mux gave us
-        const uploadResult = await FileSystem.uploadAsync(uploadUrl, videoUri, {
-          httpMethod: 'PUT',
-          headers: { 'Content-Type': 'video/mp4' }
-        });
-
-        if (uploadResult.status === 200 || uploadResult.status === 201) {
-          uploadedVideoIds.push(uploadId);
+        
+        if (Platform.OS === 'web') {
+            const blob = await getBlobFromUri(videoUri);
+            await fetch(uploadUrl, {
+                method: 'PUT',
+                body: blob,
+                headers: { 'Content-Type': 'video/mp4' }
+            });
+            uploadedVideoIds.push(uploadId);
         } else {
-          throw new Error("Mux upload failed.");
+            const uploadResult = await FileSystem.uploadAsync(uploadUrl, videoUri, {
+                httpMethod: 'PUT',
+                headers: { 'Content-Type': 'video/mp4' }
+            });
+            if (uploadResult.status === 200 || uploadResult.status === 201) {
+                uploadedVideoIds.push(uploadId);
+            } else {
+                throw new Error("Mux upload failed.");
+            }
         }
       }
 
-      // 3. BUILD FORM DATA
       formData.append("title", title);
       formData.append("description", description);
       formData.append("cityId", selectedCity);
@@ -292,17 +382,25 @@ export default function ReportScreen() {
       formData.append("priority", priority);
       tags.forEach(tag => formData.append("tags", tag));
 
-      images.forEach((uri, i) => {
-        const filename = uri.split('/').pop() || `image${i}.jpg`;
-        formData.append("images", { uri, name: filename, type: 'image/jpeg' } as any);
-      });
+      for (let i = 0; i < images.length; i++) {
+         const uri = images[i];
+         const filename = uri.split('/').pop() || `image${i}.jpg`;
+         if (Platform.OS === 'web') {
+             const blob = await getBlobFromUri(uri);
+             formData.append("images", blob, filename);
+         } else {
+             formData.append("images", { uri, name: filename, type: 'image/jpeg' } as any);
+         }
+      }
 
-      // Send the Mux IDs to our new dedicated endpoint
       uploadedVideoIds.forEach(id => {
         formData.append("muxVideoIds", id);
       });
 
-      // 4. SUBMIT TO THE NEW DEDICATED MOBILE ENDPOINT
+      if (aiImageBase64) {
+        formData.append("aiImage", aiImageBase64);
+      }
+
       const res = await fetch(`${API_BASE_URL}/reports/mobile`, {
         method: 'POST',
         body: formData,
@@ -321,7 +419,8 @@ export default function ReportScreen() {
         Alert.alert("Success!", "Report submitted successfully.", [
           { text: "Track Status", onPress: () => router.push(`/status?track=${data.reportId}`) }
         ]);
-        setTitle(''); setDescription(''); setLocationData(null); setLocationQuery(''); setImages([]); setVideos([]); setTags([]);
+        setTitle(''); setDescription(''); setLocationData(null); setLocationQuery(''); 
+        setImages([]); setVideos([]); setTags([]); setAiImageBase64(null); setScannedImageUri(null);
       } else {
         Alert.alert("Server Error", data.error || "Failed to submit report.");
       }
@@ -376,6 +475,61 @@ export default function ReportScreen() {
             <Text style={styles.subtitle}>Your voice matters. Report infrastructure issues directly to the administration.</Text>
           </View>
 
+          {/* TAB TOGGLES */}
+          <View style={styles.tabContainer}>
+            <TouchableOpacity 
+              style={[styles.tabBtn, activeMainTab === 'manual' ? styles.tabBtnActive : styles.tabBtnInactive]}
+              onPress={() => setActiveMainTab('manual')}
+            >
+              <FileEdit size={16} color={activeMainTab === 'manual' ? 'white' : '#94a3b8'} style={{marginRight: 6}}/>
+              <Text style={[styles.tabText, activeMainTab === 'manual' ? styles.tabTextActive : styles.tabTextInactive]}>Standard Form</Text>
+            </TouchableOpacity>
+            <TouchableOpacity 
+              style={[styles.tabBtn, activeMainTab === 'smart' ? styles.tabBtnSmartActive : styles.tabBtnInactive]}
+              onPress={() => setActiveMainTab('smart')}
+            >
+              <Sparkles size={16} color={activeMainTab === 'smart' ? 'white' : '#94a3b8'} style={{marginRight: 6}}/>
+              <Text style={[styles.tabText, activeMainTab === 'smart' ? styles.tabTextActive : styles.tabTextInactive]}>Smart AI Scan</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* SMART SCAN UI */}
+          {activeMainTab === 'smart' && (
+             <View style={styles.smartBox}>
+                <View style={styles.smartIconWrapper}>
+                  <Sparkles color="#fb923c" size={28}/>
+                </View>
+                <Text style={styles.smartTitle}>AI Smart Assistant</Text>
+                <Text style={styles.smartDesc}>Upload a photo first. Our Vision AI will calculate the severity and auto-fill the form for you.</Text>
+                
+                {/* PREVIEW ORIGINAL IMAGE IMMEDIATELY */}
+                {scannedImageUri && !aiImageBase64 && (
+                  <View style={{ width: '100%', alignItems: 'center', marginBottom: 16 }}>
+                    <Image source={{ uri: scannedImageUri }} style={{ width: '100%', height: 200, borderRadius: 12, borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)' }} />
+                  </View>
+                )}
+
+                <TouchableOpacity style={styles.smartScanBtn} onPress={handleSmartScan} disabled={isAnalyzingImage}>
+                  {isAnalyzingImage ? (
+                     <><ActivityIndicator color="white" style={{marginRight: 8}}/><Text style={styles.smartScanBtnText}>Scanning via Engine...</Text></>
+                  ) : (
+                     <><Camera color="white" size={20} style={{marginRight: 8}}/><Text style={styles.smartScanBtnText}>{scannedImageUri ? "Rescan Different Photo" : "Upload Photo for AI Scan"}</Text></>
+                  )}
+                </TouchableOpacity>
+
+                {/* SHOW AI RESULT */}
+                {aiImageBase64 && (
+                  <View style={styles.aiResultBox}>
+                    <Image source={{ uri: aiImageBase64 }} style={styles.aiResultImg} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ color: '#4ade80', fontWeight: 'bold' }}>AI Analysis Attached</Text>
+                      <Text style={{ color: '#94a3b8', fontSize: 12 }}>This proof will be sent directly to the administration.</Text>
+                    </View>
+                  </View>
+                )}
+             </View>
+          )}
+
           {/* STEP 1: AUTHORITY */}
           <View style={styles.card}>
             <View style={styles.cardHeader}>
@@ -424,9 +578,25 @@ export default function ReportScreen() {
 
           {/* STEP 3: DETAILS */}
           <View style={styles.card}>
-            <View style={styles.cardHeader}>
-              <View style={styles.stepBadge}><Text style={styles.stepText}>3</Text></View>
-              <Text style={styles.cardTitle}>Issue Details</Text>
+            <View style={[styles.cardHeader, { justifyContent: 'space-between' }]}>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <View style={styles.stepBadge}><Text style={styles.stepText}>3</Text></View>
+                <Text style={styles.cardTitle}>Issue Details</Text>
+              </View>
+              
+              {/* VOICE DICTATION BUTTON */}
+              <TouchableOpacity 
+                activeOpacity={0.7}
+                onPressIn={startRecording}
+                onPressOut={stopRecording}
+                disabled={isProcessingVoice}
+                style={[styles.micBtn, recording ? styles.micBtnRecording : isProcessingVoice ? styles.micBtnProcessing : {}]}
+              >
+                {isProcessingVoice ? <ActivityIndicator size="small" color="white" /> : <Mic size={16} color="white" />}
+                <Text style={styles.micBtnText}>
+                  {isProcessingVoice ? "Translating..." : recording ? "Listening..." : "Hold to Speak"}
+                </Text>
+              </TouchableOpacity>
             </View>
 
             <View style={styles.inputGroup}>
@@ -539,11 +709,34 @@ const styles = StyleSheet.create({
   title: { color: 'white', fontSize: 32, fontWeight: 'bold', marginBottom: 8 },
   subtitle: { color: '#94a3b8', fontSize: 16, lineHeight: 24 },
 
+  tabContainer: { flexDirection: 'row', gap: 12, marginBottom: 20 },
+  tabBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 12, borderRadius: 12, borderWidth: 1 },
+  tabBtnInactive: { backgroundColor: 'rgba(255,255,255,0.05)', borderColor: 'rgba(255,255,255,0.1)' },
+  tabBtnActive: { backgroundColor: '#1e293b', borderColor: '#475569' },
+  tabBtnSmartActive: { backgroundColor: 'rgba(234,88,12,0.2)', borderColor: '#ea580c' },
+  tabText: { fontSize: 14, fontWeight: 'bold' },
+  tabTextInactive: { color: '#94a3b8' },
+  tabTextActive: { color: 'white' },
+
+  smartBox: { backgroundColor: 'rgba(255,255,255,0.03)', borderColor: 'rgba(234,88,12,0.5)', borderWidth: 1, borderStyle: 'dashed', borderRadius: 24, padding: 20, marginBottom: 20, alignItems: 'center' },
+  smartIconWrapper: { width: 56, height: 56, borderRadius: 28, backgroundColor: 'rgba(234,88,12,0.2)', alignItems: 'center', justifyContent: 'center', marginBottom: 12 },
+  smartTitle: { color: 'white', fontSize: 18, fontWeight: 'bold', marginBottom: 4 },
+  smartDesc: { color: '#94a3b8', textAlign: 'center', fontSize: 14, marginBottom: 20 },
+  smartScanBtn: { backgroundColor: '#ea580c', flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingVertical: 14, borderRadius: 12 },
+  smartScanBtnText: { color: 'white', fontWeight: 'bold', fontSize: 16 },
+  aiResultBox: { marginTop: 20, width: '100%', flexDirection: 'row', backgroundColor: 'rgba(34,197,94,0.1)', borderColor: 'rgba(34,197,94,0.3)', borderWidth: 1, padding: 12, borderRadius: 12, alignItems: 'center' },
+  aiResultImg: { width: 60, height: 60, borderRadius: 8, marginRight: 12, borderWidth: 1, borderColor: 'rgba(34,197,94,0.5)' },
+
   card: { backgroundColor: 'rgba(255,255,255,0.03)', borderColor: 'rgba(255,255,255,0.08)', borderWidth: 1, borderRadius: 24, padding: 20, marginBottom: 20 },
   cardHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 20, paddingBottom: 16, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.05)' },
   stepBadge: { width: 32, height: 32, borderRadius: 16, backgroundColor: 'rgba(255,255,255,0.05)', borderColor: 'rgba(255,255,255,0.1)', borderWidth: 1, alignItems: 'center', justifyContent: 'center', marginRight: 12 },
   stepText: { color: 'white', fontWeight: 'bold', fontSize: 14 },
   cardTitle: { color: 'white', fontSize: 18, fontWeight: 'bold' },
+
+  micBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#2563eb', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20 },
+  micBtnRecording: { backgroundColor: '#ef4444' },
+  micBtnProcessing: { backgroundColor: '#475569' },
+  micBtnText: { color: 'white', fontSize: 12, fontWeight: 'bold', marginLeft: 6 },
 
   inputGroup: { marginBottom: 16 },
   label: { color: '#94a3b8', fontSize: 12, fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8, marginLeft: 4 },
@@ -574,12 +767,12 @@ const styles = StyleSheet.create({
   previewScroll: { marginTop: 16 },
   previewBox: { width: 80, height: 80, borderRadius: 12, marginRight: 12, overflow: 'hidden', alignItems: 'center', justifyContent: 'center', backgroundColor: '#1e293b' },
   previewImg: { width: '100%', height: '100%' },
-  removeMedia: { position: 'absolute', top: 4, right: 4, backgroundColor: 'rgba(239,68,68,0.9)', borderRadius: 10, width: 20, height: 20, alignItems: 'center', justifyContent: 'center' },
+  removeMedia: { position: 'absolute', top: 4, right: 4, backgroundColor: 'rgba(239,68,68,0.9)', borderRadius: 10, width: 20, height: 20, alignItems: 'center', justifyContent: 'center', pointerEvents: 'auto' },
 
   submitBtn: { backgroundColor: '#ea580c', flexDirection: 'row', height: 60, borderRadius: 16, alignItems: 'center', justifyContent: 'center', shadowColor: '#ea580c', shadowOpacity: 0.3, shadowRadius: 10, shadowOffset: { width: 0, height: 5 } },
   submitBtnText: { color: 'white', fontSize: 18, fontWeight: 'bold' },
 
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'flex-end' },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'flex-end', pointerEvents: 'auto' },
   modalContent: { backgroundColor: '#0f172a', borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingBottom: 40 },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 20, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.1)' },
   modalTitle: { color: 'white', fontSize: 18, fontWeight: 'bold' },
